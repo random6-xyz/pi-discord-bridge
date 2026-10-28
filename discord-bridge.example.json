@@ -1,0 +1,18 @@
+{
+	"discord": {
+		"enabled": false,
+		"mode": "thread",
+		"channelId": "123456789012345678",
+		"allowedUserIds": ["111111111111111111"],
+		"askTimeoutMs": 900000,
+		"threadAutoArchiveMinutes": 10080,
+		"mentionOnAsk": false
+	},
+	"reporting": {
+		"autoReport": false
+	},
+	"input": {
+		"queueWhenBusy": true,
+		"delivery": "steer"
+	}
+}

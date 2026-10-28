@@ -1,0 +1,26 @@
+{
+	"name": "pi-discord-bridge",
+	"version": "0.1.0",
+	"description": "Pi extension that connects a Pi session to Discord with per-session threads, discord_send/discord_ask tools, and Discord slash commands.",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"discord",
+		"bridge"
+	],
+	"private": true,
+	"type": "module",
+	"license": "Apache-2.0",
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"scripts": {
+		"test": "node --test tests/*.test.ts"
+	}
+}

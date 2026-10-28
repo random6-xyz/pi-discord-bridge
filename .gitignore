@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+
+# Local per-machine config (contains channel and user IDs)
+discord-bridge.json
+discord-bridge.local.json

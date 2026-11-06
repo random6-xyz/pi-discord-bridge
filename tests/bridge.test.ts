@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,13 @@ function createHarness() {
 		thinkingLevel: "off",
 		selectedModel: undefined as unknown,
 		commands: [] as Array<{ name: string; description?: string }>,
+		activeTools: [] as string[],
+		getActiveTools() {
+			return this.activeTools;
+		},
+		setActiveTools(names: string[]) {
+			this.activeTools = names;
+		},
 		sendUserMessage(content: string, options?: unknown) {
 			this.sent.push({ content, options });
 		},
@@ -51,7 +58,6 @@ function createHarness() {
 	};
 	const bridge = new DiscordBridge(fakePi as never) as any;
 	const config = {
-		enabled: true,
 		channelId: "parent-1",
 		mode: "thread",
 		threadName: undefined as string | undefined,
@@ -103,6 +109,7 @@ function createHarness() {
 
 	bridge.config = config;
 	bridge.active = true;
+	bridge.runtimeEnabled = true;
 	bridge.generation = 1;
 	bridge.botUser = { id: "bot-1", username: "pi", bot: true };
 	bridge.ctx = ctx;
@@ -299,15 +306,10 @@ test("deletes the current thread and disconnects", async () => {
 	assert.deepEqual(deleted, ["thread-1"]);
 	assert.equal(gatewayStopped, true);
 	assert.equal(bridge.active, false);
+	assert.equal(bridge.runtimeEnabled, false);
 	assert.equal(bridge.thread, undefined);
 	assert.equal(bridge.targetChannelId, undefined);
-	assert.equal(bridge.config.enabled, false);
-
-	const saved = JSON.parse(readFileSync(config.configPath, "utf8")) as {
-		discord: { enabled: boolean; mode: string };
-	};
-	assert.equal(saved.discord.enabled, false);
-	assert.equal(saved.discord.mode, "thread");
+	assert.equal(existsSync(config.configPath), false);
 });
 
 test("runs /discord-bridge status from Discord and replies with status text", async () => {
@@ -426,4 +428,158 @@ test("treats path-like text as a normal message", async () => {
 	assert.equal(fakePi.sent.length, 1);
 	assert.match(fakePi.sent[0]!.content, /^\[Discord:remote-user\] \/tmp\/file/);
 	bridge.onAgentStart();
+});
+
+function writeBridgeConfig(discord: Record<string, unknown>): string {
+	const dir = mkdtempSync(join(tmpdir(), "pi-discord-bridge-"));
+	const path = join(dir, "discord-bridge.json");
+	writeFileSync(path, JSON.stringify({ discord }));
+	return path;
+}
+
+async function withEnv<T>(
+	values: Record<string, string | undefined>,
+	fn: () => T | Promise<T>,
+): Promise<T> {
+	const previous = new Map<string, string | undefined>();
+	for (const [key, value] of Object.entries(values)) {
+		previous.set(key, process.env[key]);
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	try {
+		return await fn();
+	} finally {
+		for (const [key, value] of previous) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+function createBareBridge() {
+	const fakePi = {
+		activeTools: ["read"] as string[],
+		sent: [] as Array<{ content: string; options?: unknown }>,
+		sendUserMessage(content: string, options?: unknown) {
+			this.sent.push({ content, options });
+		},
+		appendEntry() {},
+		getActiveTools() {
+			return this.activeTools;
+		},
+		setActiveTools(names: string[]) {
+			this.activeTools = names;
+		},
+	};
+	const bridge = new DiscordBridge(fakePi as never) as any;
+	const notes: Array<{ text: string; level?: string }> = [];
+	const ctx = {
+		mode: "tui",
+		cwd: "/work/api",
+		isIdle: () => true,
+		hasUI: false,
+		signal: undefined,
+		sessionManager: {
+			getSessionId: () => "session-1",
+			getSessionName: () => "api",
+		},
+		ui: {
+			notify: (text: string, level?: string) => {
+				notes.push({ text, level });
+			},
+			setStatus: () => undefined,
+		},
+	};
+	return { bridge, fakePi, ctx, notes };
+}
+
+test("session start stays disabled even when the config file enables the bridge", async () => {
+	const path = writeBridgeConfig({
+		enabled: true,
+		channelId: "111111111111111111",
+		allowedUserIds: ["222222222222222222"],
+	});
+	const { bridge, fakePi, ctx } = createBareBridge();
+	await withEnv(
+		{
+			DISCORD_BOT_TOKEN: "token",
+			DISCORD_CHANNEL_ID: undefined,
+			DISCORD_ALLOWED_USER_IDS: undefined,
+			PI_DISCORD_BRIDGE_CONFIG: path,
+		},
+		() => {
+			bridge.onSessionStart(ctx);
+			assert.equal(bridge.isSessionEnabled, false);
+			assert.equal(bridge.active, false);
+			assert.equal(bridge.state, "stopped");
+			assert.equal(bridge.gateway, undefined);
+			assert.deepEqual(fakePi.activeTools, ["read"]);
+			const status = bridge.statusText();
+			assert.match(status, /Startup: always disabled/);
+			assert.match(status, /discord\.enabled is ignored/);
+		},
+	);
+});
+
+test("enabling activates the Discord tools for this session only", async () => {
+	const path = writeBridgeConfig({
+		channelId: "111111111111111111",
+		allowedUserIds: ["222222222222222222"],
+	});
+	const { bridge, fakePi, ctx } = createBareBridge();
+	await withEnv(
+		{
+			DISCORD_BOT_TOKEN: "token",
+			DISCORD_CHANNEL_ID: undefined,
+			DISCORD_ALLOWED_USER_IDS: undefined,
+			PI_DISCORD_BRIDGE_CONFIG: path,
+		},
+		async () => {
+			bridge.connect = async () => undefined;
+			await bridge.setEnabled(true, ctx);
+			assert.equal(bridge.isSessionEnabled, true);
+			assert.deepEqual(fakePi.activeTools, ["read", "discord_send", "discord_ask"]);
+			await bridge.setEnabled(false, ctx);
+			assert.equal(bridge.isSessionEnabled, false);
+			assert.deepEqual(fakePi.activeTools, ["read"]);
+		},
+	);
+	const saved = JSON.parse(readFileSync(path, "utf8")) as {
+		discord: Record<string, unknown>;
+	};
+	assert.equal("enabled" in saved.discord, false);
+});
+
+test("refuses to enable with an invalid config and keeps tools inactive", async () => {
+	const path = writeBridgeConfig({
+		channelId: "111111111111111111",
+		allowedUserIds: ["222222222222222222"],
+	});
+	const { bridge, fakePi, ctx } = createBareBridge();
+	await withEnv(
+		{
+			DISCORD_BOT_TOKEN: undefined,
+			DISCORD_CHANNEL_ID: undefined,
+			DISCORD_ALLOWED_USER_IDS: undefined,
+			PI_DISCORD_BRIDGE_CONFIG: path,
+		},
+		async () => {
+			bridge.connect = async () => undefined;
+			await bridge.setEnabled(true, ctx);
+			assert.equal(bridge.isSessionEnabled, false);
+			assert.equal(bridge.active, false);
+			assert.equal(bridge.state, "error");
+			assert.deepEqual(fakePi.activeTools, ["read"]);
+		},
+	);
+});
+
+test("reconnect warns instead of enabling while the session is disabled", async () => {
+	const { bridge, ctx, notes } = createBareBridge();
+	ctx.hasUI = true;
+	await bridge.reconnect(ctx);
+	assert.equal(bridge.isSessionEnabled, false);
+	assert.equal(bridge.active, false);
+	assert.match(notes.at(-1)?.text ?? "", /disabled in this session/);
 });

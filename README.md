@@ -50,6 +50,8 @@ In Pi, reload and enable the bridge:
 /discord-bridge on
 ```
 
+The bridge always starts disabled, in every session and project. `on` enables it for the current session only. The choice is never written to the config file, so a Pi restart or `/reload` begins disabled again, and the `discord_send`/`discord_ask` tools stay hidden from the model until the session is enabled.
+
 Each machine should use its own parent channel. The same bot token can be reused across servers, and every Pi process opens one gateway connection.
 
 ## Discord bot setup
@@ -65,7 +67,6 @@ The default config path is `~/.pi/agent/discord-bridge.json`. Override it with `
 ```json
 {
   "discord": {
-    "enabled": false,
     "mode": "thread",
     "channelId": "123456789012345678",
     "allowedUserIds": ["111111111111111111"],
@@ -78,9 +79,11 @@ The default config path is `~/.pi/agent/discord-bridge.json`. Override it with `
 }
 ```
 
+`discord.enabled` is not a setting. Older config files may still contain it; the value is ignored and `/discord-bridge status` reports it as a warning.
+
 | Key | Default | Description |
 | --- | --- | --- |
-| `discord.enabled` | `false` | Whether the bridge is enabled. `/discord-bridge on\|off` persists this value. |
+| `discord.enabled` | — | Ignored legacy key, reported as a warning. Use `/discord-bridge on` per session instead. |
 | `discord.mode` | `"thread"` | `"thread"`: create a thread per session (recommended). `"channel"`: one session uses one channel directly. |
 | `discord.channelId` | required | Parent channel ID. In `channel` mode this is the conversation channel. |
 | `discord.threadName` | session/folder name | Base name for session threads. |
@@ -123,14 +126,14 @@ Environment overrides:
 | Command | Description |
 | --- | --- |
 | `/discord-bridge status` | Connection state, parent channel, session thread, pending question, last error |
-| `/discord-bridge on` / `off` | Enable/disable the bridge (persisted to the config file) |
+| `/discord-bridge on` / `off` | Enable/disable the bridge for this session (never persisted) |
 | `/discord-bridge reconnect` | Reconnect the gateway. In thread mode the thread is re-checked too |
 | `/discord-bridge delete` | Delete the current session thread and its messages, then disconnect |
 | `/discord-bridge test` | Send a test message to the session thread |
 | `/discord-bridge send <message>` | Send a message from the Pi UI to the session thread |
 | `/discord-bridge help` | Show command help |
 
-`off` keeps the thread. Running `on` again reuses it. `delete` removes the current session thread and all of its messages, persists `enabled: false`, requires the **Manage Threads** permission, and asks for confirmation. It cannot be run from Discord; use the local terminal.
+`off` keeps the thread. Running `on` again reuses it. `delete` removes the current session thread and all of its messages, disables the bridge for the session, requires the **Manage Threads** permission, and asks for confirmation. It cannot be run from Discord; use the local terminal.
 
 ### Discord slash commands
 
@@ -200,7 +203,7 @@ Each machine uses one parent channel, and every Pi session gets a thread under i
 | 403 | Channel/thread permissions (View Channel, Send Messages, Create Public Threads, Send Messages in Threads, Manage Threads) |
 | 404 | `channelId` and whether the bot has joined the server |
 | Messages ignored | `discord.allowedUserIds`, and whether the message is in the current session thread |
-| Not connecting | `enabled`, the `discord-bridge.json` path, and `/discord-bridge status`. One-shot modes (`print`/`json`) are disabled by default |
+| Not connecting | Run `/discord-bridge on` in this session; the bridge never connects automatically. Also check the `discord-bridge.json` path and `/discord-bridge status`. One-shot modes (`print`/`json`) are disabled by default |
 | Lock error | Another Pi process is already using the same session |
 
 Set `PI_DISCORD_BRIDGE_DEBUG=1` for detailed logs. Initial connection failures are retried automatically.

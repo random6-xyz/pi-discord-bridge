@@ -1,6 +1,6 @@
 {
 	"name": "pi-discord-bridge",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Pi extension that connects a Pi session to Discord with per-session threads, discord_send/discord_ask tools, and Discord slash commands.",
 	"keywords": [
 		"pi-package",

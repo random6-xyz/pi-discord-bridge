@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 export const DEFAULT_ASK_TIMEOUT_MS = 15 * 60 * 1_000;
 export const DEFAULT_THREAD_AUTO_ARCHIVE_MINUTES = 10_080;
@@ -19,7 +19,6 @@ export type BridgeMode = "channel" | "thread";
 export type BridgeDelivery = "steer" | "followUp";
 
 export interface BridgeConfig {
-	enabled: boolean;
 	/** Parent Discord channel. In thread mode, each Pi session gets a thread here. */
 	channelId: string;
 	mode: BridgeMode;
@@ -171,8 +170,14 @@ export function loadConfig(configPath = getDefaultConfigPath()): BridgeConfig {
 	const input = asRecord(root.input) ?? {};
 	const reporting = asRecord(root.reporting) ?? {};
 
-	const enabled =
+	const legacyEnabled =
 		asBoolean(discord.enabled) ?? asBoolean(root.enabled) ?? false;
+	if (legacyEnabled) {
+		warnings.push(
+			"discord.enabled is ignored: the bridge always starts disabled. " +
+				"Run /discord-bridge on in the session you want to use.",
+		);
+	}
 
 	const channelId = parseId(
 		env("DISCORD_CHANNEL_ID") ??
@@ -271,7 +276,6 @@ export function loadConfig(configPath = getDefaultConfigPath()): BridgeConfig {
 	}
 
 	return {
-		enabled,
 		channelId,
 		mode,
 		threadName,
@@ -287,55 +291,4 @@ export function loadConfig(configPath = getDefaultConfigPath()): BridgeConfig {
 		warnings,
 		errors,
 	};
-}
-
-export function persistEnabled(
-	config: BridgeConfig,
-	enabled: boolean,
-): { ok: true } | { ok: false; error: string } {
-	try {
-		let root: JsonRecord = {};
-		const hadConfigFile = existsSync(config.configPath);
-		if (hadConfigFile) {
-			const parsed: unknown = JSON.parse(readFileSync(config.configPath, "utf8"));
-			const record = asRecord(parsed);
-			if (!record) throw new Error("The top-level config value is not a JSON object.");
-			root = record;
-		}
-
-		const discord = asRecord(root.discord) ?? {};
-		if (hadConfigFile) {
-			// Only update enabled on an existing file; env overrides must not be written back.
-			root.discord = { ...discord, enabled };
-		} else {
-			root.discord = {
-				enabled,
-				...(config.channelId ? { channelId: config.channelId } : {}),
-				mode: config.mode,
-				...(config.threadName ? { threadName: config.threadName } : {}),
-				threadAutoArchiveMinutes: config.threadAutoArchiveMinutes,
-				...(config.allowedUserIds.length > 0
-					? { allowedUserIds: config.allowedUserIds }
-					: {}),
-				askTimeoutMs: config.askTimeoutMs,
-				mentionOnAsk: config.mentionOnAsk,
-			};
-			root.reporting = { autoReport: false };
-			root.input = {
-				queueWhenBusy: config.queueWhenBusy,
-				delivery: config.delivery,
-			};
-		}
-
-		mkdirSync(dirname(config.configPath), { recursive: true });
-		const tempPath = `${config.configPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(root, null, 2)}\n`, "utf8");
-		renameSync(tempPath, config.configPath);
-		return { ok: true };
-	} catch (error) {
-		return {
-			ok: false,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
 }

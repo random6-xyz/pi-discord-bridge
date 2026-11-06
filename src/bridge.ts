@@ -14,7 +14,7 @@ import {
 	type ParsedSlashCommand,
 	type SlashCommandKind,
 } from "./commands.ts";
-import { loadConfig, persistEnabled, type BridgeConfig } from "./config.ts";
+import { loadConfig, type BridgeConfig } from "./config.ts";
 import { DiscordGateway, type GatewayState } from "./gateway.ts";
 import {
 	acquireBridgeLock,
@@ -34,6 +34,8 @@ const THREAD_BINDING_ENTRY = "discord-bridge-thread";
 const THREAD_NAME_LIMIT = 100;
 const THREAD_ACTIVE_CACHE_MS = 60_000;
 const THREAD_CHANNEL_TYPES = new Set([10, 11, 12]);
+/** Tools this extension registers; active only while the bridge is enabled. */
+export const DISCORD_TOOL_NAMES: readonly string[] = ["discord_send", "discord_ask"];
 /** Fallback re-check while a send is in flight or Pi is busy without streaming. */
 const FORWARD_RETRY_MS = 1_000;
 
@@ -110,6 +112,8 @@ function botLabel(user: DiscordUser | undefined): string {
 export class DiscordBridge {
 	private readonly pi: ExtensionAPI;
 	private config: BridgeConfig;
+	/** Runtime-only switch: enabling is never persisted, so every session starts disabled. */
+	private runtimeEnabled = false;
 	private ctx: ExtensionContext | undefined;
 	private rest: DiscordRest | undefined;
 	private gateway: DiscordGateway | undefined;
@@ -170,7 +174,43 @@ export class DiscordBridge {
 		}
 	}
 
-	start(ctx: ExtensionContext | undefined, configOverride?: BridgeConfig): void {
+	/** Whether the bridge is enabled for this Pi session (never persisted). */
+	get isSessionEnabled(): boolean {
+		return this.runtimeEnabled;
+	}
+
+	/**
+	 * Session start never connects. Enabling is an explicit per-session action, so a
+	 * config file can never auto-activate the bridge in every Pi process again.
+	 */
+	onSessionStart(ctx: ExtensionContext): void {
+		this.ctx = ctx;
+		this.runtimeEnabled = false;
+		this.stop();
+		this.config = loadConfig();
+		this.clearLegacyStatus(ctx);
+		this.syncToolsActive();
+		this.debug("Session start: the bridge stays disabled until /discord-bridge on.");
+	}
+
+	/** Keep the Discord tools in the active set only while this session is enabled. */
+	private syncToolsActive(): void {
+		try {
+			const current = this.pi.getActiveTools?.() ?? [];
+			const shouldBeActive = this.runtimeEnabled && this.active;
+			const missing = DISCORD_TOOL_NAMES.filter((name) => !current.includes(name));
+			const present = DISCORD_TOOL_NAMES.filter((name) => current.includes(name));
+			if (shouldBeActive ? missing.length === 0 : present.length === 0) return;
+			const next = shouldBeActive
+				? [...current, ...missing]
+				: current.filter((name) => !DISCORD_TOOL_NAMES.includes(name));
+			this.pi.setActiveTools?.(next);
+		} catch {
+			// Older Pi builds may not expose runtime tool activation.
+		}
+	}
+
+	start(ctx: ExtensionContext | undefined): void {
 		if (ctx) this.ctx = ctx;
 		const targetCtx = this.ctx;
 		if (!targetCtx) {
@@ -182,6 +222,7 @@ export class DiscordBridge {
 		if (this.isChildProcess) {
 			this.active = false;
 			this.debug("Not starting the bridge in a subagent process.");
+			this.syncToolsActive();
 			return;
 		}
 		const headlessAllowed = process.env.PI_DISCORD_BRIDGE_ALLOW_HEADLESS === "1";
@@ -192,26 +233,24 @@ export class DiscordBridge {
 		) {
 			this.active = false;
 			this.debug(`Not starting the bridge in one-shot mode (${targetCtx.mode}).`);
+			this.syncToolsActive();
 			return;
 		}
 		if (this.active || this.starting) return;
 
-		this.config = configOverride ?? loadConfig();
+		this.config = loadConfig();
 		this.forwardQueue = [];
 		this.forwardInFlight = false;
 		this.clearForwardTimer();
 		this.thread = undefined;
 		this.targetChannelId = undefined;
 		this.threadCheckedAt = 0;
-		if (!this.config.enabled) {
-			this.active = false;
-			this.state = "stopped";
-			return;
-		}
 		if (this.config.errors.length > 0) {
 			this.active = false;
+			this.runtimeEnabled = false;
 			this.state = "error";
 			this.lastError = this.config.errors.join("\n");
+			this.syncToolsActive();
 			this.notify(
 				`Discord bridge configuration error:\n${this.config.errors.join("\n")}`,
 				"error",
@@ -224,6 +263,7 @@ export class DiscordBridge {
 		this.hasEverConnected = false;
 		this.firstErrorNotified = false;
 		this.lastError = undefined;
+		this.syncToolsActive();
 		const generation = ++this.generation;
 		this.state = "connecting";
 
@@ -510,6 +550,7 @@ export class DiscordBridge {
 		this.targetChannelId = undefined;
 		this.sessionId = undefined;
 		this.threadCheckedAt = 0;
+		this.syncToolsActive();
 		this.notify(`Failed to start the Discord bridge:\n${this.lastError}`, "error");
 		this.debug(`Start failed: ${this.lastError}`);
 	}
@@ -543,6 +584,7 @@ export class DiscordBridge {
 		this.lock?.release();
 		this.lock = undefined;
 		this.clearLegacyStatus();
+		this.syncToolsActive();
 		this.debug("Bridge stopped.");
 	}
 
@@ -553,32 +595,36 @@ export class DiscordBridge {
 			this.notify("Cannot toggle the Discord bridge without a Pi session context.", "error");
 			return;
 		}
-		const previous = this.config;
-		const persisted = persistEnabled(previous, enabled);
-		if (!persisted.ok) {
-			this.notify(
-				`Failed to save the Discord bridge configuration: ${persisted.error}`,
-				"warning",
-			);
+		if (!enabled) {
+			this.runtimeEnabled = false;
+			this.stop();
+			this.notify("Discord bridge disabled for this session.", "info");
+			return;
 		}
-
+		// Enabling is session-scoped and never written to the config file. Restart
+		// from a clean state so setEnabled(true) is also a reconnect.
 		this.stop();
-		if (enabled) {
-			// Re-read the file so a changed token/channel is validated and a failed
-			// persistence still starts with the in-memory enabled flag.
-			this.config = { ...loadConfig(), enabled: true };
-			this.start(targetCtx, this.config);
-			this.notify("Discord bridge enabled.", "info");
-		} else {
-			this.config = { ...previous, enabled: false };
-			this.notify("Discord bridge disabled.", "info");
+		this.runtimeEnabled = true;
+		this.start(targetCtx);
+		if (!this.active) {
+			// start() already reported why (config error, subagent, one-shot mode).
+			this.runtimeEnabled = false;
+			this.syncToolsActive();
+			return;
 		}
+		this.notify(
+			"Discord bridge enabled for this session only. Restarting Pi disables it again.",
+			"info",
+		);
 	}
 
 	async reconnect(ctx?: ExtensionContext): Promise<void> {
 		if (ctx) this.ctx = ctx;
-		if (!this.config.enabled) {
-			await this.setEnabled(true, ctx);
+		if (!this.runtimeEnabled) {
+			this.notify(
+				"The Discord bridge is disabled in this session. Run /discord-bridge on first.",
+				"warning",
+			);
 			return;
 		}
 		const targetCtx = this.ctx;
@@ -588,9 +634,12 @@ export class DiscordBridge {
 		}
 		if (!this.active || !this.gateway || this.config.mode === "thread") {
 			this.stop();
-			this.config = loadConfig();
-			this.config.enabled = true;
-			this.start(targetCtx, this.config);
+			this.runtimeEnabled = true;
+			this.start(targetCtx);
+			if (!this.active) {
+				this.runtimeEnabled = false;
+				this.syncToolsActive();
+			}
 			this.notify(
 				this.config.mode === "thread"
 					? "Discord bridge reconnecting and re-checking the thread."
@@ -613,7 +662,7 @@ export class DiscordBridge {
 
 	statusText(): string {
 		const lines: string[] = [];
-		const enabled = this.config.enabled;
+		const enabled = this.runtimeEnabled;
 		const state =
 			this.active || this.starting
 				? this.state === "connected"
@@ -630,7 +679,8 @@ export class DiscordBridge {
 					: "disabled";
 
 		lines.push(`Discord bridge: ${state}`);
-		lines.push(`Enabled: ${enabled ? "yes" : "no"}`);
+		lines.push(`Enabled: ${enabled ? "yes" : "no"} (this session)`);
+		lines.push("Startup: always disabled (run /discord-bridge on to enable)");
 		lines.push(
 			`Mode: ${this.config.mode === "thread" ? "thread" : "channel"}`,
 		);
@@ -788,7 +838,7 @@ export class DiscordBridge {
 			return;
 		}
 
-		const config = this.config.enabled ? this.config : loadConfig();
+		const config = this.runtimeEnabled ? this.config : loadConfig();
 		if (config.mode !== "thread") {
 			this.notify(
 				"Session threads can only be deleted in thread mode. " +
@@ -867,16 +917,8 @@ export class DiscordBridge {
 			}
 		}
 
-		const persisted = persistEnabled(this.config, false);
-		if (!persisted.ok) {
-			this.notify(
-				`Failed to save the Discord bridge configuration: ${persisted.error}`,
-				"warning",
-			);
-		}
-		const previous = this.config;
+		this.runtimeEnabled = false;
 		this.stop();
-		this.config = { ...previous, enabled: false };
 		this.notify(
 			`Deleted the Discord thread and disconnected: ${threadName}`,
 			"info",
@@ -887,7 +929,7 @@ export class DiscordBridge {
 		if (this.isChildProcess) {
 			throw new Error("The Discord bridge is unavailable in subagent processes.");
 		}
-		if (!this.config.enabled) {
+		if (!this.runtimeEnabled) {
 			throw new Error("The Discord bridge is disabled. Run /discord-bridge on.");
 		}
 		if (this.config.errors.length > 0) {
@@ -1139,6 +1181,12 @@ export class DiscordBridge {
 			subcommand === "off" ||
 			subcommand === "reconnect"
 		) {
+			if (subcommand === "reconnect" && !this.runtimeEnabled) {
+				await this.safeSend(
+					"The Discord bridge is disabled in this session. Run /discord-bridge on first.",
+				);
+				return;
+			}
 			// Reply before running: these restart or stop the bridge, which drops the
 			// REST client the reply would need.
 			await this.safeSend(`▶️ Running \`/discord-bridge ${subcommand}\`.`);
@@ -1616,6 +1664,8 @@ export class DiscordBridge {
 		this.lastError = fatal ? formatApiError(error) : error.message;
 		if (fatal) {
 			this.state = "error";
+			this.active = false;
+			this.syncToolsActive();
 			const pending = this.pendingAsk;
 			if (pending) {
 				this.settlePending(

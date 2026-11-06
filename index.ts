@@ -13,6 +13,7 @@ export default function discordBridgeExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "discord_send",
+		defaultActive: false,
 		label: "Discord Send",
 		description:
 			"Send an explicit message to the configured Discord channel. " +
@@ -51,6 +52,7 @@ export default function discordBridgeExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "discord_ask",
+		defaultActive: false,
 		label: "Discord Ask",
 		description:
 			"Ask the user a question in the configured Discord channel and wait for their reply. " +
@@ -114,7 +116,8 @@ export default function discordBridgeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		bridge.start(ctx);
+		// Never connect here: enabling is an explicit, per-session `/discord-bridge on`.
+		bridge.onSessionStart(ctx);
 	});
 
 	pi.on("agent_start", () => {

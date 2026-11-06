@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadConfig, persistEnabled } from "../src/config.ts";
+import { loadConfig } from "../src/config.ts";
 
 const TOKEN_KEY = "DISCORD_BOT_TOKEN";
 const CHANNEL_KEY = "DISCORD_CHANNEL_ID";
@@ -55,7 +55,9 @@ test("loads the spec-shaped config file", () => {
 		() => loadConfig(),
 	);
 
-	assert.equal(config.enabled, true);
+	assert.ok(
+		config.warnings.some((warning) => warning.includes("discord.enabled is ignored")),
+	);
 	assert.equal(config.mode, "thread");
 	assert.equal(config.threadAutoArchiveMinutes, 10_080);
 	assert.equal(config.channelId, "123456789012345678");
@@ -67,7 +69,7 @@ test("loads the spec-shaped config file", () => {
 	assert.deepEqual(config.errors, []);
 });
 
-test("defaults to disconnected when enabled is omitted", () => {
+test("ignores a missing enabled flag", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-discord-config-"));
 	const path = join(dir, "discord-bridge.json");
 	writeFileSync(
@@ -90,7 +92,8 @@ test("defaults to disconnected when enabled is omitted", () => {
 		() => loadConfig(),
 	);
 
-	assert.equal(config.enabled, false);
+	assert.equal("enabled" in config, false);
+	assert.deepEqual(config.warnings, []);
 	assert.equal(config.mode, "thread");
 });
 
@@ -144,31 +147,6 @@ test("reports missing required settings", () => {
 	assert.ok(config.errors.some((error) => error.includes("DISCORD_BOT_TOKEN")));
 	assert.ok(config.errors.some((error) => error.includes("channel ID")));
 	assert.ok(config.errors.some((error) => error.includes("allowed user IDs")));
-});
-
-test("persists enabled without dropping other config keys", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-discord-config-"));
-	const path = join(dir, "discord-bridge.json");
-	writeFileSync(
-		path,
-		JSON.stringify({
-			discord: { enabled: true, channelId: "111111111111111111" },
-			custom: { keep: true },
-		}),
-	);
-	const config = withEnv(
-		{
-			[TOKEN_KEY]: "test-token",
-			[CONFIG_KEY]: path,
-		},
-		() => loadConfig(),
-	);
-
-	const result = persistEnabled(config, false);
-	assert.equal(result.ok, true);
-	const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-	assert.deepEqual(saved.custom, { keep: true });
-	assert.equal((saved.discord as { enabled: boolean }).enabled, false);
 });
 
 test("parses input.delivery and normalizes follow-up aliases", () => {
@@ -257,24 +235,3 @@ test("lets DISCORD_DELIVERY override the config file", () => {
 	assert.equal(config.delivery, "steer");
 });
 
-test("writes delivery when creating a new config file", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pi-discord-config-"));
-	const path = join(dir, "discord-bridge.json");
-	const config = withEnv(
-		{
-			[TOKEN_KEY]: "test-token",
-			[CHANNEL_KEY]: "111111111111111111",
-			[USERS_KEY]: "222222222222222222",
-			[CONFIG_KEY]: path,
-		},
-		() => loadConfig(),
-	);
-	config.delivery = "followUp";
-
-	assert.equal(persistEnabled(config, false).ok, true);
-	const saved = JSON.parse(readFileSync(path, "utf8")) as {
-		input: { queueWhenBusy: boolean; delivery: string };
-	};
-	assert.equal(saved.input.delivery, "followUp");
-	assert.equal(saved.input.queueWhenBusy, true);
-});
